@@ -1593,15 +1593,16 @@ button, .btn {
   import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
   import { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
-  const firebaseConfig = {
-    apiKey: "AIzaSyAtbCRVEgI4BHGITBtCPSpsWXRzRdcsuP8",
-    authDomain: "ace-app-b6264.firebaseapp.com",
-    projectId: "ace-app-b6264",
-    storageBucket: "ace-app-b6264.firebasestorage.app",
-    messagingSenderId: "822422486914",
-    appId: "1:822422486914:web:3d751ee389d7b33230d99b",
-    measurementId: "G-WZQX1R1B3W"
-  };
+const firebaseConfig = {
+  apiKey: "AIzaSyAtbCRVEgI4BHGITBtCPSpsWXRzRdcsuP8",
+  authDomain: "ace-app-b6264.firebaseapp.com",
+  projectId: "ace-app-b6264",
+  databaseURL: "https://ace-app-b6264-default-rtdb.firebaseio.com",
+  storageBucket: "ace-app-b6264.firebasestorage.app",
+  messagingSenderId: "822422486914",
+  appId: "1:822422486914:web:3d751ee389d7b33230d99b",
+  measurementId: "G-WZQX1R1B3W"
+};
 
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app);
