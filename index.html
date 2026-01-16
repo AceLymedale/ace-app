@@ -1588,12 +1588,11 @@ button, .btn {
   </div>
 </div>
 
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
-<script>
-  // Firebase (compat) initialisation. Uses global `firebase` so it loads synchronously
-  // before the main app script runs.
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+  import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+
   const firebaseConfig = {
     apiKey: "AIzaSyAtbCRVEgI4BHGITBtCPSpsWXRzRdcsuP8",
     authDomain: "ace-app-b6264.firebaseapp.com",
@@ -1604,46 +1603,35 @@ button, .btn {
     measurementId: "G-WZQX1R1B3W"
   };
 
-  firebase.initializeApp(firebaseConfig);
-  const auth = firebase.auth();
-  const db = firebase.firestore();
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
 
-  // Minimal shim that mimics the v9 modular API used by the app's cloud-sync code.
+  // Expose a minimal API for the non-module scripts below.
   window.__aceFirebase = {
     auth,
     db,
-    // doc(db, ...segments)
-    doc: (dbObj, ...segments) => dbObj.doc(segments.join('/')),
-    // getDoc(ref)
-    getDoc: async (ref) => {
-      const snap = await ref.get();
-      return {
-        exists: () => !!snap.exists,
-        data: () => snap.data()
-      };
-    },
-    // setDoc(ref, data, options)
-    setDoc: async (ref, data, options) => ref.set(data, options),
-    // onSnapshot(ref, next, error)
-    onSnapshot: (ref, next, error) => {
-      return ref.onSnapshot(
-        (snap) => next({ exists: () => !!snap.exists, data: () => snap.data() }),
-        (err) => { if (typeof error === 'function') error(err); }
-      );
-    },
-    // serverTimestamp()
-    serverTimestamp: () => firebase.firestore.FieldValue.serverTimestamp(),
-
-    onAuthStateChanged: (authObj, cb) => authObj.onAuthStateChanged(cb),
-    signInWithEmailAndPassword: (authObj, email, pass) => authObj.signInWithEmailAndPassword(email, pass),
-    createUserWithEmailAndPassword: (authObj, email, pass) => authObj.createUserWithEmailAndPassword(email, pass),
-    signOut: (authObj) => authObj.signOut()
+    doc,
+    getDoc,
+    setDoc,
+    onSnapshot,
+    serverTimestamp,
+    onAuthStateChanged,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut
   };
 
-  // In compat mode, we can consider Firebase ready immediately.
-  window.__aceFirebaseReady = Promise.resolve(true);
+  // Promise that resolves once we've received the initial auth state.
+  window.__aceFirebaseReady = new Promise((resolve) => {
+    const unsub = onAuthStateChanged(auth, () => {
+      try { unsub(); } catch (e) {}
+      resolve(true);
+    });
+  });
 </script>
 <script>
+
 /* ================================
    ACE Attendance & Welfare Rebuild
    Robust persistence + UK dates
@@ -1667,18 +1655,74 @@ const LS_SESSION = LS_KEY + "_SESSION";
 const LS_UI  = "ACE_APP_UI_V1";           // UI state (tab, dept, collapsed groups)
 
 const USERS = [
-  // ACETEST is given admin permissions so they can view the Admin tab.  The
-  // canAdmin flag grants access to the admin section without needing to
-  // change their role from 'user'.  See bindLoginHard for how canAdmin is
-  // mapped to session.canAdmin.  We also set canDelete to true so ACETEST
-  // has permission to delete actions (absence, part shift, me day, etc.).
-  { username: "ACETEST", password: "ASDA2025", role: "user", canAdmin: true, canDelete: true },
-  { username: "LYMEDALEADMIN", password: "ASDA2025", role: "admin" }
+  // Built-in accounts use salted PBKDF2 hashes (no plaintext passwords stored).
+  { username: "ACETEST", passwordSalt: "LxdrucwAsBggxYfrb3/+iQ==", passwordHash: "pi3SrvCEgWoupGai+9CfZJ+7BnQVCyeQGjn2PtD/Xkk=", passwordIter: 120000, role: "user", canAdmin: true, canDelete: true },
+  { username: "LYMEDALEADMIN", passwordSalt: "bbDsvcSPe7I+g2bxofzoPw==", passwordHash: "1AWW2rTrhIbVJZiXSREtDjBFYgfdV6kyC6bALYyl0Wo=", passwordIter: 120000, role: "admin" }
 ];
 
 /* ---------- Utilities ---------- */
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const pad2 = (n) => String(n).padStart(2,"0");
+
+// -------- Password hashing helpers (PBKDF2 via WebCrypto) --------
+const PW_DEFAULT_ITER = 120000;
+const PW_SALT_BYTES = 16;
+
+function b64ToBytes(b64){
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64(bytes){
+  let bin = "";
+  bytes.forEach(b => bin += String.fromCharCode(b));
+  return btoa(bin);
+}
+async function pbkdf2Hash(password, saltB64, iter=PW_DEFAULT_ITER){
+  const salt = b64ToBytes(saltB64);
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(password),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits']
+  ).catch(()=>crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']));
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' },
+    keyMaterial,
+    256
+  );
+  return bytesToB64(new Uint8Array(bits));
+}
+async function makePasswordRecord(password, iter=PW_DEFAULT_ITER){
+  const salt = crypto.getRandomValues(new Uint8Array(PW_SALT_BYTES));
+  const saltB64 = bytesToB64(salt);
+  const hashB64 = await pbkdf2Hash(password, saltB64, iter);
+  return { passwordSalt: saltB64, passwordHash: hashB64, passwordIter: iter };
+}
+async function verifyPasswordRecord(rec, password){
+  if(!rec) return { ok:false, migrated:false };
+  // New format
+  if(rec.passwordHash && rec.passwordSalt){
+    const iter = rec.passwordIter || PW_DEFAULT_ITER;
+    const h = await pbkdf2Hash(password, rec.passwordSalt, iter);
+    return { ok: h === rec.passwordHash, migrated:false };
+  }
+  // Legacy plaintext format (migrate on success)
+  if(typeof rec.password === 'string'){
+    if(rec.password !== password) return { ok:false, migrated:false };
+    const nr = await makePasswordRecord(password);
+    rec.passwordSalt = nr.passwordSalt;
+    rec.passwordHash = nr.passwordHash;
+    rec.passwordIter = nr.passwordIter;
+    delete rec.password;
+    return { ok:true, migrated:true };
+  }
+  return { ok:false, migrated:false };
+}
+
 function toUKDate(isoOrDate){
   if(!isoOrDate) return "";
   const d = (isoOrDate instanceof Date) ? isoOrDate : new Date(isoOrDate);
@@ -2246,7 +2290,7 @@ function defaultState(){
     },
     // Recently viewed colleagues for quick navigation in the sidebar
     recentColleagues: [],
-    users: [],           // custom user accounts {username,password,canDelete,canAdmin}
+    users: [],           // custom user accounts {username,passwordHash,passwordSalt,passwordIter,canDelete,canAdmin,persistent}
     // Audit trail of actions performed within the system.
     // Each entry is an object { ts, user, action, entity, recordId, colleagueId, details }.
     // The logAudit() helper manages the size of this array.
@@ -2369,7 +2413,7 @@ function saveState(){
       // Sync to Firestore (shared cloud state) if Firebase is signed in.
       try{
         if(typeof saveStateToCloud === 'function'){
-          saveStateToCloud(clone).catch(err => console && console.error && console.error("Cloud save failed", err));
+          saveStateToCloud(clone);
         }
       }catch(e){
         console && console.warn && console.warn('Cloud save failed', e);
@@ -2678,7 +2722,7 @@ async function initFirebaseAuthAndSync(){
           if(!cloud){
             const clone = JSON.parse(JSON.stringify(state));
             clone.session = {}; // never store session in cloud
-            await saveStateToCloud(clone).catch(err => console && console.error && console.error("Cloud save failed", err));
+            await saveStateToCloud(clone);
           }
         }catch(e){}
       }else{
@@ -2733,40 +2777,56 @@ function initLogin(){
   uEl.addEventListener("input", clearErr);
   pEl.addEventListener("input", clearErr);
 
-  form.addEventListener("submit", (e)=>{
+  form.addEventListener("submit", async (e)=>{
     // Hard stop any default navigation (prevents "fields clear" behaviour)
     e.preventDefault();
     e.stopPropagation();
-    doLogin();
+    doLogin().catch(e=>{ console.error('Login failed', e); });
     return false;
   }, true);
 }
 
-function doLogin(){
+async function doLogin(){
   const u = (document.getElementById("username").value || "").trim();
   const p = (document.getElementById("password").value || "");
-  const match = USERS.find(x => x.username===u && x.password===p);
   const err = document.getElementById("login-error");
+
+  // Look up built-in or custom account
+  let match = USERS.find(x => x.username === u);
+  let isCustom = false;
   if(!match){
+    match = (state.users || []).find(x => x.username === u);
+    isCustom = !!match;
+  }
+
+  const v = await verifyPasswordRecord(match, p);
+  if(!match || !v.ok){
     if(err) err.style.display = "block";
     return;
   }
   if(err) err.style.display = "none";
 
+  // If a legacy plaintext custom password was migrated, persist it.
+  if(isCustom && v.migrated){
+    saveState();
+  }
+
   // Persist session
   state.session.loggedIn = true;
   state.session.username = match.username;
   state.session.role = match.role;
-  // Grant full privileges to the ACETEST user regardless of role.  This ensures
-  // that ACETEST retains deletion and admin rights even if defined as a
-  // non-admin role in the USERS array.  Without this override, the user
-  // would inherit the role from the USERS definition which defaults to
-  // 'user'.
+
+  // Apply privilege flags from either built-in or custom record
+  state.session.canDelete = !!match.canDelete;
+  state.session.canAdmin  = !!match.canAdmin || match.role === 'admin';
+
+  // ACETEST override
   if(match.username === 'ACETEST'){
     state.session.canDelete = true;
     state.session.canAdmin  = true;
     state.session.adminUnlocked = true;
   }
+
   saveState();
 
   // Swap views + render
@@ -3994,7 +4054,7 @@ function openDATestModal(rec=null){
   `;
   openModal(isNew ? "Add D&A" : "Edit D&A", body, [
     { label: "Cancel", onClick: closeModal },
-    { label: "Save", kind: "primary", onClick: () => {
+    { label: "Save", kind: "primary", onClick: async () => {
       const mgr = document.getElementById("da-mgr").value;
       const col = document.getElementById("da-col").value;
       const date = document.getElementById("da-date").value;
@@ -4160,7 +4220,7 @@ function renderProfile(host){
   // Attach handler after rendering
   const form = host.querySelector("#change-password-form");
   if(form){
-    form.addEventListener("submit", (e) => {
+    form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const cur = (form.querySelector("#change-cur")?.value || "");
       const np  = (form.querySelector("#change-new")?.value || "");
@@ -4185,16 +4245,19 @@ function renderProfile(host){
       }
       if(customIndex >= 0){
         const rec = state.users[customIndex];
-        if(rec.password !== cur){
+        const vr = await verifyPasswordRecord(rec, cur);
+        if(!vr.ok){
           alert("Current password is incorrect");
           return;
         }
         // update password in custom account
-        state.users[customIndex] = Object.assign({}, rec, { password: np });
+        const nr = await makePasswordRecord(np);
+        state.users[customIndex] = Object.assign({}, rec, nr);
       } else {
         // fallback to built-in account
         const built = USERS.find(u => u.username === username);
-        if(!built || built.password !== cur){
+        const vr2 = await verifyPasswordRecord(built, cur);
+        if(!built || !vr2.ok){
           alert("Current password is incorrect");
           return;
         }
@@ -4204,7 +4267,8 @@ function renderProfile(host){
         state.users = state.users || [];
         // If a previous override exists (should not), remove it
         state.users = state.users.filter(u => u.username !== username);
-        state.users.push({ username: built.username, password: np, canDelete: canDel, canAdmin: canAdm, persistent: true });
+        const nr2 = await makePasswordRecord(np);
+        state.users.push({ username: built.username, canDelete: canDel, canAdmin: canAdm, persistent: true, ...nr2 });
       }
       saveState();
       alert("Password changed successfully.");
@@ -4241,7 +4305,7 @@ function openPositiveRocModal(rec=null){
   `;
   openModal(isNew ? "Add Positive ROC" : "Edit Positive ROC", body, [
     { label: "Cancel", onClick: closeModal },
-    { label: "Save", kind: "primary", onClick: () => {
+    { label: "Save", kind: "primary", onClick: async () => {
       const col = document.getElementById("pr-col").value;
       const mgr = document.getElementById("pr-mgr").value;
       const date = document.getElementById("pr-date").value;
@@ -9520,11 +9584,11 @@ function openUserModal(rec=null){
   // with empty/default values.  We do not assign an id because user
   // objects are identified solely by username.
   // Add a 'persistent' flag so users can opt out of data wipe.
-  const r = rec || { username:"", password:"", canDelete:false, canAdmin:false, persistent:false };
+  const r = rec || { username:"", canDelete:false, canAdmin:false, persistent:false };
   const body = `
     <div class="grid">
       <div class="field"><label>Username</label><input id="user-username" value="${escapeHtml(r.username || "")}" ${isNew?"":"readonly"}></div>
-      <div class="field"><label>Password</label><input id="user-password" type="password" value="${escapeHtml(r.password || "")}"></div>
+      <div class="field"><label>Password</label><input id="user-password" type="password" value=""></div>
       <div class="field"><label><input id="user-delete" type="checkbox" ${r.canDelete?"checked":""}> Can delete</label></div>
       <div class="field"><label><input id="user-admin" type="checkbox" ${r.canAdmin?"checked":""}> Can access Admin</label></div>
       <div class="field"><label><input id="user-persist" type="checkbox" ${r.persistent?"checked":""}> Keep on wipe</label></div>
@@ -9532,14 +9596,15 @@ function openUserModal(rec=null){
   `;
   openModal(isNew ? "Add user" : "Edit user", body, [
     { label: "Cancel", onClick: closeModal },
-    { label: "Save", kind: "primary", onClick: () => {
+    { label: "Save", kind: "primary", onClick: async () => {
       const uname = document.getElementById("user-username").value.trim();
       const pwd   = document.getElementById("user-password").value;
       const canDel = document.getElementById("user-delete").checked;
       const canAdm = document.getElementById("user-admin").checked;
       const persist = document.getElementById("user-persist").checked;
       if(!uname) return alert("Enter a username");
-      if(!pwd)   return alert("Enter a password");
+      const isNew = !rec;
+      if(isNew && !pwd) return alert("Enter a password");
       // Check for duplicate usernames.  New users cannot have a name that
       // matches an existing custom account or a built-in account.  When
       // editing, allow the same username.  The built-in USERS array is
@@ -9553,13 +9618,16 @@ function openUserModal(rec=null){
         }
         // Append new user to state.users
         state.users = state.users || [];
-        state.users.push({ username: uname, password: pwd, canDelete: canDel, canAdmin: canAdm, persistent: persist });
+        const nr = await makePasswordRecord(pwd);
+        state.users.push({ username: uname, canDelete: canDel, canAdmin: canAdm, persistent: persist, ...nr });
       }else{
-        // Editing an existing user: find and update the record.  We do not
-        // allow editing the username because it is the identifier.
-        state.users = (state.users || []).map(u => {
+        // Editing an existing user: update permissions, and optionally reset password.
+        state.users = state.users || [];
+        const nr2 = pwd ? await makePasswordRecord(pwd) : null;
+        state.users = state.users.map(u => {
           if(u.username === r.username){
-            return Object.assign({}, u, { password: pwd, canDelete: canDel, canAdmin: canAdm, persistent: persist });
+            const base = Object.assign({}, u, { canDelete: canDel, canAdmin: canAdm, persistent: persist });
+            return nr2 ? Object.assign(base, nr2) : base;
           }
           return u;
         });
@@ -9587,17 +9655,26 @@ function openAdminLoginModal(onSuccess){
   `;
   openModal("Admin login", body, [
     { label: "Cancel", onClick: closeModal },
-    { label: "Login", kind: "primary", onClick: () => {
+    { label: "Login", kind: "primary", onClick: async () => {
       const u = document.getElementById("admin-login-user").value.trim();
       const p = document.getElementById("admin-login-pass").value;
       // Search custom user accounts with admin permission
       let match = null;
       if(Array.isArray(state.users)){
-        match = state.users.find(x => x.username === u && x.password === p && x.canAdmin);
+        match = state.users.find(x => x.username === u && x.canAdmin) || null;
+        if(match){
+          const vr = await verifyPasswordRecord(match, p);
+          if(!vr.ok) match = null;
+          else if(vr.migrated) saveState();
+        }
       }
       // Fall back to built-in USERS with role admin
       if(!match){
-        match = USERS.find(x => x.username === u && x.password === p && (x.role === 'admin'));
+        match = USERS.find(x => x.username === u && (x.role === 'admin' || x.canAdmin));
+        if(match){
+          const vr2 = await verifyPasswordRecord(match, p);
+          if(!vr2.ok) match = null;
+        }
       }
       if(!match){
         alert("Invalid administrator credentials");
@@ -9907,7 +9984,7 @@ renderNav();
 
 
 /* ---------- Login (override: bulletproof binding) ---------- */
-(function bindLoginHard(){
+(async function bindLoginHard(){
   const form = document.getElementById("login-form");
   const btn  = document.getElementById("login-btn");
   const uEl  = document.getElementById("username");
@@ -9919,7 +9996,7 @@ renderNav();
   uEl.addEventListener("input", clearErr);
   pEl.addEventListener("input", clearErr);
 
-  const attempt = ()=>{
+  const attempt = async ()=>{
     // Show loading state on the login button while validating credentials.  Disable
     // interactions to prevent multiple submissions.
     if(btn){
@@ -9945,11 +10022,20 @@ renderNav();
     if(Array.isArray(state.users)){
       overrideExists = state.users.some(x => x.username === u);
       // Try to match against custom user credentials first
-      match = state.users.find(x => x.username === u && x.password === p);
+      match = state.users.find(x => x.username === u) || null;
+      if(match){
+        const vr = await verifyPasswordRecord(match, p);
+        if(!vr.ok) match = null;
+        else if(vr.migrated) saveState();
+      }
     }
     // If there is no custom override for this username, fall back to built-in
     if(!match && !overrideExists){
-      match = USERS.find(x => x.username===u && x.password===p);
+      match = USERS.find(x => x.username===u) || null;
+      if(match){
+        const vr2 = await verifyPasswordRecord(match, p);
+        if(!vr2.ok) match = null;
+      }
     }
     if(!match){
       if(err) err.style.display = "block";
@@ -10020,7 +10106,7 @@ renderNav();
   };
 
   // Prevent any default submit navigation (this is what was clearing fields)
-  form.addEventListener("submit", (e)=>{
+  form.addEventListener("submit", async (e)=>{
     e.preventDefault();
     e.stopPropagation();
     attempt();
